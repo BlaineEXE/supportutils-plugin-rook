@@ -11,7 +11,11 @@ resource_detail() {
   local namespace="$1"
   local resource="$2"
   section_header "$resource detail"
-  plugin_command "$KUBECTL --namespace=$namespace get $resource --output=yaml" 2>&1
+  # --output=json and --output=yaml have more information than 'kubectl describe'
+  # output is cluttered, but sometimes critical information is missing from 'kubectl describe'
+  # --output=json has same info as --output=yaml
+  # use --output=json so that 'jq' can be used to inspect logs afterwards if desired
+  plugin_command "$KUBECTL --namespace=$namespace get $resource --output=json" 2>&1
 }
 
 resource_overview_and_detail() {
@@ -38,7 +42,6 @@ get_pod_containers() {
 pod_logs() {
   local namespace="$1"
   local pod="$2"
-  local logfile="$3"
   if ! containers="$(get_pod_containers "$namespace" "$pod")"; then
     return $? # error
   fi

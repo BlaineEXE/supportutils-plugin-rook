@@ -1,4 +1,9 @@
 #!/bin/bash
+if [[ "${BASH_VERSINFO:-0}" -lt 4 ]]; then
+  echo "ERROR: Bash 4 or greater is required to run this script"
+  exit 1
+fi
+
 
 RCFILE="/usr/lib/supportconfig/resources/scplugin.rc"
 CENSORED='<<CENSORED BY SUPPORTCONFIG PLUGIN>>'
@@ -16,6 +21,7 @@ mkdir $LOG/ceph/
 KUBECTL="${KUBECTL:-kubectl}"
 ROOK_NAMESPACE="${ROOK_NAMESPACE:-rook-ceph}"
 KUBECTL_ROOK="$KUBECTL --namespace $ROOK_NAMESPACE"
+CT=${CEPH_CONNECT_TIMEOUT:-5} # CEPH_CONNECT_TIMEOUT default = 5 seconds
 
 
 #############################################################
@@ -42,6 +48,7 @@ fi
 resource_overview "" namespaces >> $KUBELOG/namespaces 2>&1
 
 resource_overview_and_detail "" crds >> $KUBELOG/crds 2>&1
+resource_overview_and_detail "" podsecuritypolicies >> $KUBELOG/podsecuritypolicies 2>&1
 
 
 #############################################################
@@ -63,6 +70,7 @@ resource_overview_and_detail "$ROOK_NAMESPACE" replicasets >> $ROOKLOG/replicase
 resource_overview_and_detail "$ROOK_NAMESPACE" deployments >> $ROOKLOG/deployments 2>&1
 resource_overview_and_detail "$ROOK_NAMESPACE" "jobs" >> $ROOKLOG/jobs 2>&1
 resource_overview_and_detail "$ROOK_NAMESPACE" daemonsets >> $ROOKLOG/daemonsets 2>&1
+resource_overview_and_detail "$ROOK_NAMESPACE" statefulsets >> $ROOKLOG/statefulsets 2>&1
 resource_overview_and_detail "$ROOK_NAMESPACE" configmaps >> $ROOKLOG/configmaps 2>&1
 # TODO: does detail on secrets reveal too much secure info about a customer?
 resource_overview "$ROOK_NAMESPACE" secrets >> $ROOKLOG/secrets 2>&1
@@ -95,6 +103,7 @@ plugin_message "" # newline
 plugin_command "$ROOK_SHELL rook version" &> $ROOKLOG/rook-version
 
 
+#############################################################
 plugin_message "Collecting Rook-Ceph Custom Resources for cluster $ROOK_NAMESPACE"
 
 CRLOG=$ROOKLOG/custom-resources
@@ -121,17 +130,45 @@ section_header "Rook-Ceph Pod logs"
 PODLOG=$ROOKLOG/pod-logs
 mkdir $PODLOG
 
-pods="$($KUBECTL_ROOK get pods --output=name)"
-for pod in $pods; do
-  pod=${pod##pod/} # --output=names gives names in format pod/<pod-name>; strip "pod/" from start
+pods_json="$($KUBECTL_ROOK get pods --output=json)"
+echo "$pods_json" | jq -r '.items[] | "\(.metadata.name) \(.metadata.labels.ceph_daemon_type) \(.metadata.labels.ceph_daemon_id) \(.status.phase)"' |
+while read pod dtype did phase; do
+  daemon=""
+  if [[ "$dtype" != "null" ]] && [[ "$did" != "null" ]]; then
+    daemon="$dtype.$did"
+  fi
+  phase="${phase,,}" # convert to lower case (only in bash 4+)
+
+  if [[ "$phase" = "running" ]]; then
+    echo "Pod $pod is running daemon $daemon"
+
+    mkdir -p $LOG/ceph/$daemon
+    if [[ "$daemon" =~ ^(mon|mgr|mds|osd) ]] ; then
+        $KUBECTL_ROOK exec $pod -- ceph --connect-timeout=$CT daemon $daemon config show \
+              > $LOG/ceph/$daemon/ceph-daemon-config 2>&1
+        $KUBECTL_ROOK exec $pod -- ceph --connect-timeout=$CT daemon $daemon perf dump \
+              > $LOG/ceph/$daemon/ceph-daemon-perf 2>&1
+    fi
+
+    case $daemon in
+      mon.*)
+        $KUBECTL_ROOK exec $pod -- ceph --connect-timeout=$CT daemon $daemon dump_historic_ops \
+              > $LOG/ceph/$daemon/ceph-daemon-historic_ops 2>&1
+        ;;
+    esac
+
+  else
+    echo "Pod $pod is not running"
+  fi
+
   plugin_message "Collecting logs from Pod $pod"
   pod_logs $ROOK_NAMESPACE $pod >> $PODLOG/$pod-logs
+
 done
-plugin_message "" # newline
 
 
 #############################################################
-section_header "Ceph cluster logs"
+section_header "Ceph cluster information"
 PODLOG=$ROOKLOG/pods
 
 # Determine which Rook image the cluster is using for the collector helper
@@ -151,4 +188,20 @@ plugin_command "$COLLECTOR_SHELL ceph status"
 
 
 #############################################################
-# TODO: get disk layout of nodes?
+section_header "Rook log files"
+PODLOG=$ROOKLOG/pods
+
+if cluster_json="$($KUBECTL_ROOK get CephCluster $ROOK_NAMESPACE --output=json)"; then
+  dataDirHostPath="$(echo "$cluster_json" | jq -r '.spec.dataDirHostPath')"
+else
+  dataDirHostPath="/var/lib/rook" # default dataDirHostPath for Rook
+fi
+
+rook_log_dir="$dataDirHostPath"/$ROOK_NAMESPACE/log/
+if [ -d "$rook_log_dir" ]; then
+    mkdir -p $LOG/ceph/log/ceph
+    # Copy any files directly in /var/log/ceph (e.g. /var/log/ceph/cephadm.log),
+    # or in any subdirectory (containerized daemons may log to /var/log/ceph/$FSID)
+    find "$rook_log_dir" -type f -exec cp '{}' $LOG/ceph/log/ceph ';'
+    plugin_message "Rook logs copied to ceph/log subdirectory"
+fi
