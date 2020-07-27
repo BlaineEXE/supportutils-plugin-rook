@@ -22,6 +22,7 @@ KUBECTL="${KUBECTL:-kubectl}"
 ROOK_NAMESPACE="${ROOK_NAMESPACE:-rook-ceph}"
 KUBECTL_ROOK="$KUBECTL --namespace $ROOK_NAMESPACE"
 CT=${CEPH_CONNECT_TIMEOUT:-5} # CEPH_CONNECT_TIMEOUT default = 5 seconds
+CEPH="ceph --connect-timeout=$CT"
 
 
 #############################################################
@@ -141,19 +142,43 @@ while read pod dtype did phase; do
 
   if [[ "$phase" = "running" ]]; then
     echo "Pod $pod is running daemon $daemon"
+    DAEMONLOG=$LOG/ceph/$daemon
+    mkdir -p $DAEMONLOG
 
-    mkdir -p $LOG/ceph/$daemon
+    CEPH_DAEMON_CMD="$KUBECTL_ROOK exec $pod -- $CEPH daemon $daemon"
+
     if [[ "$daemon" =~ ^(mon|mgr|mds|osd) ]] ; then
-        $KUBECTL_ROOK exec $pod -- ceph --connect-timeout=$CT daemon $daemon config show \
-              > $LOG/ceph/$daemon/ceph-daemon-config 2>&1
-        $KUBECTL_ROOK exec $pod -- ceph --connect-timeout=$CT daemon $daemon perf dump \
-              > $LOG/ceph/$daemon/ceph-daemon-perf 2>&1
+        plugin_command $CEPH_DAEMON_CMD config show > $DAEMONLOG/ceph-daemon-config 2>&1
+        plugin_command $CEPH_DAEMON_CMD perf dump > $DAEMONLOG/ceph-daemon-perf 2>&1
     fi
 
     case $daemon in
+      mds.*)
+        plugin_command $CEPH_DAEMON_CMD dump_historic_ops > $DAEMONLOG/ceph-daemon-historic_ops 2>&1
+        plugin_command $CEPH_DAEMON_CMD status > $DAEMONLOG/ceph-daemon-status 2>&1
+        plugin_command $CEPH_DAEMON_CMD get subtrees > $DAEMONLOG/ceph-daemon-subtrees 2>&1
+        ;;
+      mgr.*)
+        plugin_command $CEPH_DAEMON_CMD status > $DAEMONLOG/ceph-daemon-status 2>&1
+        ;;
       mon.*)
-        $KUBECTL_ROOK exec $pod -- ceph --connect-timeout=$CT daemon $daemon dump_historic_ops \
-              > $LOG/ceph/$daemon/ceph-daemon-historic_ops 2>&1
+        plugin_command $CEPH_DAEMON_CMD dump_historic_ops > $DAEMONLOG/ceph-daemon-historic_ops 2>&1
+        ;;
+      osd.*)
+        plugin_command $CEPH_DAEMON_CMD dump_historic_ops > $DAEMONLOG/ceph-daemon-historic_ops 2>&1
+        plugin_command $CEPH_DAEMON_CMD dump_ops_in_flight > $DAEMONLOG/ceph-daemon-ops_in_flight 2>&1
+        plugin_command $CEPH_DAEMON_CMD status > $DAEMONLOG/ceph-daemon-status 2>&1
+        plugin_command $CEPH_DAEMON_CMD dump_watchers > $DAEMONLOG/ceph-daemon-watchers 2>&1
+        ;;
+      nfs.*)
+        echo "NFS daemons are not supported currently"
+        ;;
+      iscsi.*)
+        echo "iSCSI daemons are not supported currently"
+        ;;
+      prometheus.*)
+        echo "prometheus daemons are not supported currently"
+        # TODO: support Rook logging w/ Prometheus
         ;;
     esac
 
