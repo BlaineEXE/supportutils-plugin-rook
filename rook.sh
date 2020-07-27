@@ -127,21 +127,30 @@ plugin_message "" # newline
 
 
 #############################################################
-section_header "Rook-Ceph Pod logs"
+section_header "Rook-Ceph Pod inspection"
 PODLOG=$ROOKLOG/pod-logs
 mkdir $PODLOG
 
 pods_json="$($KUBECTL_ROOK get pods --output=json)"
 echo "$pods_json" | jq -r '.items[] | "\(.metadata.name) \(.metadata.labels.ceph_daemon_type) \(.metadata.labels.ceph_daemon_id) \(.status.phase)"' |
 while read pod dtype did phase; do
+  plugin_message "Inspecting Pod $pod"
+
   daemon=""
   if [[ "$dtype" != "null" ]] && [[ "$did" != "null" ]]; then
     daemon="$dtype.$did"
   fi
   phase="${phase,,}" # convert to lower case (only in bash 4+)
 
-  if [[ "$phase" = "running" ]]; then
-    echo "Pod $pod is running daemon $daemon"
+  if [[ -z "$daemon" ]]; then
+    plugin_message "  Pod does not run a Ceph daemon"
+  fi
+  if [[ "$phase" != "running" ]]; then
+    plugin_message "  Pod is not running"
+  fi
+
+  if [[ "$phase" = "running" ]] && [[ -n "$daemon" ]]; then
+    plugin_message "  collecting information about daemon $daemon"
     DAEMONLOG=$LOG/ceph/$daemon
     mkdir -p $DAEMONLOG
 
@@ -182,13 +191,12 @@ while read pod dtype did phase; do
         ;;
     esac
 
-  else
-    echo "Pod $pod is not running"
   fi
 
-  plugin_message "Collecting logs from Pod $pod"
+  plugin_message "  collecting Pod logs"
   pod_logs $ROOK_NAMESPACE $pod >> $PODLOG/$pod-logs
 
+  plugin_message "" # newline
 done
 
 
@@ -210,6 +218,7 @@ fi
 trap stop_collector_helper EXIT
 
 plugin_command "$COLLECTOR_SHELL ceph status"
+# TODO: COLLECTOR_SHELL is CEPH_SHELL from Tim's SES supportutils
 
 
 #############################################################
